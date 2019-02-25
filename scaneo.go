@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"text/template"
 )
@@ -19,7 +20,7 @@ const (
     Generate Go code to convert database rows into arbitrary structs.
 
 USAGE
-    scaneo [options] paths...
+    scaneo [options] <golang_import_path=golang_source_package_or_file>...
 
 OPTIONS
     -o, -output
@@ -73,9 +74,13 @@ type fieldToken struct {
 }
 
 type structToken struct {
-	Name   string
+	Import   string
+	Selector string
+	Name     string
 	Fields []fieldToken
 }
+
+type importMap map[string][]string
 
 func main() {
 	log.SetFlags(0)
@@ -116,21 +121,23 @@ func main() {
 		*packName = filepath.Base(wd)
 	}
 
-	files, err := findFiles(flag.Args())
+	importmap, err := findFiles(flag.Args())
 	if err != nil {
 		log.Println("couldn't find files:", err)
 		log.Fatal(usageText)
 	}
 
 	structToks := make([]structToken, 0, 8)
-	for _, file := range files {
-		toks, err := parseCode(file, *whitelist)
-		if err != nil {
-			log.Println(`"syntax error" - parser probably`)
-			log.Fatal(err)
-		}
+	for targetImport, targetPathSlice := range importmap {
+		for _, targetPath := range targetPathSlice {
+			toks, err := parseCode(targetImport, targetPath, *whitelist)
+			if err != nil {
+				log.Println(`"syntax error" - parser probably`)
+				log.Fatal(err)
+			}
 
-		structToks = append(structToks, toks...)
+			structToks = append(structToks, toks...)
+		}
 	}
 
 	if err := genFile(*outFilename, *packName, *unexport, structToks); err != nil {
@@ -138,7 +145,7 @@ func main() {
 	}
 }
 
-func findFiles(paths []string) ([]string, error) {
+func findFiles(paths []string) (importMap, error) {
 	if len(paths) < 1 {
 		return nil, errors.New("no starting paths")
 	}
@@ -146,21 +153,30 @@ func findFiles(paths []string) ([]string, error) {
 	// using map to prevent duplicate file path entries
 	// in case the user accidently passes the same file path more than once
 	// probably because of autocomplete
-	files := make(map[string]struct{})
+	files := make(map[string]map[string]bool)
 
-	for _, path := range paths {
-		info, err := os.Stat(path)
+	for _, target := range paths {
+		targetComponents := strings.Split(target, "=")
+		if len(targetComponents) != 2 {
+			return nil, fmt.Errorf("broken target, expected <golang_import_path=golang_source_package_or_file>, you provided: %s", target)
+		}
+		targetImport, targetPath := targetComponents[0], targetComponents[1]
+		info, err := os.Stat(targetPath)
 		if err != nil {
 			return nil, err
 		}
 
+		if _, found := files[targetImport]; !found {
+			files[targetImport] = make(map[string]bool)
+		}
+
 		if !info.IsDir() {
 			// add file path to files
-			files[path] = struct{}{}
+			files[targetImport][targetPath] = true
 			continue
 		}
 
-		filepath.Walk(path, func(fp string, fi os.FileInfo, _ error) error {
+		filepath.Walk(targetPath, func(fp string, fi os.FileInfo, _ error) error {
 			if fi.IsDir() {
 				// will still enter directory
 				return nil
@@ -169,20 +185,31 @@ func findFiles(paths []string) ([]string, error) {
 			}
 
 			// add file path to files
-			files[fp] = struct{}{}
+			files[targetImport][fp] = true
 			return nil
 		})
 	}
 
-	deduped := make([]string, 0, len(files))
-	for f := range files {
-		deduped = append(deduped, f)
+	result := make(importMap)
+
+	var importSlice []string
+	for targetImport := range files {
+		importSlice = append(importSlice, targetImport)
 	}
 
-	return deduped, nil
+	for _, targetImport := range importSlice {
+		var paths []string
+		for targetPath := range files[targetImport] {
+			paths = append(paths, targetPath)
+		}
+		sort.Strings(paths)
+		result[targetImport] = paths
+	}
+
+	return result, nil
 }
 
-func parseCode(source string, commaList string) ([]structToken, error) {
+func parseCode(targetImport string, source string, commaList string) ([]structToken, error) {
 	wlist := make(map[string]struct{})
 	if commaList != "" {
 		wSplits := strings.Split(commaList, ",")
@@ -202,6 +229,12 @@ func parseCode(source string, commaList string) ([]structToken, error) {
 	var filter bool
 	if len(wlist) > 0 {
 		filter = true
+	}
+
+	var selectorExpr string
+	{
+		selectorList := strings.Split(targetImport, "/")
+		selectorExpr = selectorList[len(selectorList) - 1]
 	}
 
 	//ast.Print(fset, astf)
@@ -225,7 +258,8 @@ func parseCode(source string, commaList string) ([]structToken, error) {
 			// found a struct in the source code!
 
 			var structTok structToken
-
+			structTok.Import = targetImport
+			structTok.Selector = selectorExpr
 			// filter logic
 			if structName := typeSpec.Name.Name; !filter {
 				// no filter, collect everything
@@ -352,12 +386,28 @@ func genFile(outFile, pkg string, unexport bool, toks []structToken) error {
 	}
 	defer fout.Close()
 
+	importSet := make(map[string]bool)
+	for _, tok := range toks {
+		importSet[tok.Import] = true
+	}
+
+	var importList []string
+	for targetImport := range importSet {
+		if targetImport == "" {
+			continue
+		}
+		importList = append(importList, targetImport)
+	}
+	sort.Strings(importList)
+
 	data := struct {
 		PackageName string
+		Import      []string
 		Tokens      []structToken
 		Visibility  string
 	}{
 		PackageName: pkg,
+		Import:      importList,
 		Visibility:  "S",
 		Tokens:      toks,
 	}

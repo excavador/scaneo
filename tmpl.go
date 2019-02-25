@@ -5,23 +5,28 @@ const (
 
 package {{.PackageName}}
 
-import "database/sql"
+import (
+	"database/sql"
+	{{- range $i, $import := .Import }}
+	"{{ $import }}"
+	{{- end }}
+)
 
-{{range .Tokens}}func {{$.Visibility}}can{{title .Name}}(r *sql.Row) ({{.Name}}, error) {
-	var s {{.Name}}
+{{range .Tokens}}func {{$.Visibility}}can{{title .Name}}(r *sql.Row) ({{ if .Selector }}{{ .Selector }}.{{ end }}{{.Name}}, error) {
+	var s {{ if .Selector }}{{ .Selector }}.{{ end }}{{.Name}}
 	if err := r.Scan({{range .Fields}}
 		&s.{{.Name}},{{end}}
 	); err != nil {
-		return {{.Name}}{}, err
+		return {{ if .Selector }}{{ .Selector }}.{{ end }}{{.Name}}{}, err
 	}
 	return s, nil
 }
 
-func {{$.Visibility}}can{{title .Name}}s(rs *sql.Rows) ([]{{.Name}}, error) {
-	structs := make([]{{.Name}}, 0, 16)
+func {{$.Visibility}}can{{title .Name}}s(rs *sql.Rows) ([]{{ if .Selector }}{{ .Selector }}.{{ end }}{{.Name}}, error) {
+	structs := make([]{{ if .Selector }}{{ .Selector }}.{{ end }}{{.Name}}, 0, 16)
 	var err error
 	for rs.Next() {
-		var s {{.Name}}
+		var s {{ if .Selector }}{{ .Selector }}.{{ end }}{{.Name}}
 		if err = rs.Scan({{range .Fields}}
 			&s.{{.Name}},{{end}}
 		); err != nil {
